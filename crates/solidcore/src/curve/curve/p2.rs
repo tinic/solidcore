@@ -354,6 +354,30 @@ pub trait CurveEvaluate {
     /// The point at `t` (`EvaluatePoint`).
     fn evaluate_point(&self, k: &Kernel, t: f64) -> Result<Point3>;
 
+    /// [`CurveEvaluate::evaluate`] into the caller's slice (`num_derivs = out.len() - 1`):
+    /// the entries the evaluation returns are written, the others are set to
+    /// [`Vec3::UNDEF`]. The default evaluates as [`CurveEvaluate::evaluate`] and copies;
+    /// [`Curve`] writes in place where its kind can, without a heap allocation.
+    ///
+    /// # Errors
+    ///
+    /// Those of [`CurveEvaluate::evaluate`].
+    fn evaluate_into(
+        &self,
+        k: &Kernel,
+        t: f64,
+        from_left: bool,
+        non_zero_tangents: bool,
+        out: &mut [Vec3],
+    ) -> Result<()> {
+        let num_derivs = out.len().saturating_sub(1);
+        let pv = self.evaluate(k, t, num_derivs, from_left, non_zero_tangents)?;
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = at(&pv, i);
+        }
+        Ok(())
+    }
+
     /// The virtual `IsClosed(crInterval, dTol)`: the base class
     /// ([`crate::curve::curve::p4::is_closed_base`]) unless the kind overrides it.
     ///
@@ -543,6 +567,17 @@ impl CurveEvaluate for Curve {
 
     fn evaluate_point(&self, k: &Kernel, t: f64) -> Result<Point3> {
         Self::evaluate_point(self, k, t)
+    }
+
+    fn evaluate_into(
+        &self,
+        k: &Kernel,
+        t: f64,
+        from_left: bool,
+        non_zero_tangents: bool,
+        out: &mut [Vec3],
+    ) -> Result<()> {
+        Self::evaluate_into(self, k, t, from_left, non_zero_tangents, out)
     }
 
     fn is_closed_virtual(&self, k: &Kernel, interval: &Extent1d, tol: f64) -> Result<bool> {
@@ -1549,6 +1584,12 @@ impl Curve {
             .len()
             .checked_sub(1)
             .ok_or_else(|| SolidError::curve(OP_EVAL, CurveFailure::NoEvaluationSlots))?;
+        if let CurveKind::Line(line) = &self.kind {
+            // as [`Curve::evaluate`]'s arm, written in place
+            crate::curve::check_eval_derivs(num_derivs, OP_EVAL)?;
+            line.evaluate_into(t, out);
+            return Ok(());
+        }
         let pv = self.evaluate(k, t, num_derivs, from_left, non_zero_tangents)?;
         for (i, slot) in out.iter_mut().enumerate() {
             *slot = at(&pv, i);
