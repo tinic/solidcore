@@ -1272,7 +1272,9 @@ pub fn create_uv_trim_curves_notified(
     // (recorded on the B-rep: a nested `smsurf_GetSurfaceCache` of the face's surface
     // then finds no face, so it does not build the face's UV trim curves itself)
     b.begin_surface_owner_cleared(f);
+    let gaps = k.trim_fit_gaps_kept();
     let result = create_uv_trim_curves_body(k, b, f, adjust_tolerances, opt_uv_curves, &pre, env);
+    drop(gaps);
     // SmRescueSurfaceOwner's destructor restores the owner on every return
     b.end_surface_owner_cleared(f);
     if let Some(s) = b.face_mut(f)?.surface.as_mut() {

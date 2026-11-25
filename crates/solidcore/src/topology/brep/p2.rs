@@ -505,6 +505,8 @@ pub fn rebuild_uv_trim_curves(k: &Kernel, b: &mut Brep) -> Result<()> {
 /// [`get_or_create_uv_trim_curve`](eu3::get_or_create_uv_trim_curve), or the failing
 /// status it returned ([`eu3::UvTrimCurveFetch::status`]).
 pub fn create_missing_uv_trim_curves(k: &Kernel, b: &mut Brep) -> Result<()> {
+    // every trim made here fits its edge's tolerance, measuring each use of the edge
+    let _gaps = k.trim_fit_gaps_kept();
     for eu in edgeuses(b, None)? {
         if eu1::faceuse(b, eu)?.is_none() || eu1::uv_trim_curve_pointer(b, eu)?.is_some() {
             continue;

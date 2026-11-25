@@ -908,6 +908,49 @@ impl CancelToken {
     }
 }
 
+/// The gaps [`Kernel::trim_fit_gaps`] keeps: by edge use index and the bits of its edge's
+/// interval ends, the gap measured (`None`: the measurement failed and was ignored).
+#[doc(hidden)]
+pub type TrimFitGaps =
+    std::collections::BTreeMap<(u32, u64, u64), Option<crate::heal::gap::EdgeFaceGap>>;
+
+/// While it lives, [`crate::topology::edgeuse::p3::fit_tolerance`] keeps the gaps it
+/// measures ([`Kernel::trim_fit_gaps`]). The outermost scope starts with none and drops
+/// them at its end; a scope inside another shares the outer one's.
+pub(crate) struct TrimFitGapsKept<'k> {
+    kernel: &'k Kernel,
+    outermost: bool,
+}
+
+impl Drop for TrimFitGapsKept<'_> {
+    fn drop(&mut self) {
+        if self.outermost {
+            if let Ok(mut kept) = self.kernel.trim_fit_gaps.try_borrow_mut() {
+                *kept = None;
+            }
+        }
+    }
+}
+
+impl Kernel {
+    /// Keeps the gaps the trim fit measures until the returned scope ends
+    /// ([`TrimFitGapsKept`]): for a run that makes or fixes UV trims without changing an
+    /// edge's curve or a face's surface.
+    pub(crate) fn trim_fit_gaps_kept(&self) -> TrimFitGapsKept<'_> {
+        let outermost = match self.trim_fit_gaps.try_borrow_mut() {
+            Ok(mut kept) if kept.is_none() => {
+                *kept = Some(TrimFitGaps::new());
+                true
+            }
+            _ => false,
+        };
+        TrimFitGapsKept {
+            kernel: self,
+            outermost,
+        }
+    }
+}
+
 /// Per-session kernel state passed to operations (upstream `SmContext`).
 ///
 /// A `Kernel` is `Send` (it can move between threads) and holds no global state, so
@@ -971,6 +1014,15 @@ pub struct Kernel {
     /// definition is evaluated through `&Kernel`; it is never borrowed across a solve, and
     /// a hit returns what a fresh solve from the same seeds gives.
     pub blend_station_memo: RefCell<crate::blend::fillet_section::definition::StationMemo>,
+    /// Not upstream: the edge/face gaps [`crate::topology::edgeuse::p3::fit_tolerance`]
+    /// measured for edge uses without a cached gap, kept while UV trims are being made
+    /// ([`Kernel::trim_fit_gaps_kept`]); `None` outside. By edge use index and the bits of
+    /// its edge's interval: the gap is the edge's curve over that interval against its
+    /// face's surface, which making and fixing UV trims does not change, so a kept gap is
+    /// what measuring again gives. The fit is asked once per edge use made, per trim
+    /// fixed and per trim kept covered, and measures every use of the edge each time.
+    #[doc(hidden)]
+    pub trim_fit_gaps: RefCell<Option<TrimFitGaps>>,
     /// Not upstream: the arena-identity record map of the last stitch glue or split
     /// (`heal::stitch::p1`) and the B-rep value it was kept for (its progress tag, held
     /// weakly), kept only to reuse its allocation. An edit of another B-rep value starts
@@ -1097,6 +1149,7 @@ impl Kernel {
             blend_station_memo: RefCell::new(
                 crate::blend::fillet_section::definition::StationMemo::default(),
             ),
+            trim_fit_gaps: RefCell::new(None),
             arena_notify_records: (
                 std::sync::Weak::new(),
                 crate::topology::topology::NotifyRecords::new(),
