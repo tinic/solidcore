@@ -764,11 +764,20 @@ impl Line {
     /// ones are zero.
     #[must_use]
     pub fn evaluate(&self, t: f64, num_derivs: usize) -> Vec<Vec3> {
+        let mut out = vec![Vec3::ZERO; num_derivs + 1];
+        self.evaluate_into(t, &mut out);
+        out
+    }
+
+    /// [`Line::evaluate`] into the caller's slice (`num_derivs = out.len() - 1`), without
+    /// a heap allocation: the same operations in the same order.
+    pub fn evaluate_into(&self, t: f64, out: &mut [Vec3]) {
+        let num_derivs = out.len().saturating_sub(1);
         // convert to STEP parameter
         let step_param = self.convert_t_from_nurbs_to_step(t);
 
         // Set 2nd order and higher derivatives to zero
-        let mut out = vec![Vec3::ZERO; num_derivs + 1];
+        out.fill(Vec3::ZERO);
 
         // position
         if let Some(p) = out.first_mut() {
@@ -787,7 +796,6 @@ impl Line {
                 };
             }
         }
-        out
     }
 
     /// Position and derivatives `0..=num_derivs` at STEP parameter `t`

@@ -174,10 +174,17 @@ pub(super) fn eval_n<const N: usize, C: CurveEvaluate + ?Sized>(
     from_left: bool,
     non_zero_tangents: bool,
 ) -> Result<[Vec3; N]> {
-    let v = curve.evaluate(k, t, num_derivs, from_left, non_zero_tangents)?;
     let mut out = [Vec3::UNDEF; N];
-    for (d, s) in out.iter_mut().zip(v) {
-        *d = s;
+    match out.get_mut(..=num_derivs) {
+        // written in place: no vector is made for the values
+        Some(asked) => curve.evaluate_into(k, t, from_left, non_zero_tangents, asked)?,
+        // more derivatives asked than the array holds: the first `N` of them
+        None => {
+            let v = curve.evaluate(k, t, num_derivs, from_left, non_zero_tangents)?;
+            for (d, s) in out.iter_mut().zip(v) {
+                *d = s;
+            }
+        }
     }
     Ok(out)
 }
@@ -2629,6 +2636,53 @@ mod tests {
             &Extent1d::from_min_max(a, b),
             &BoundedLineOptions::default(),
         ))
+    }
+
+    /// [`eval_n`] writes in place what [`CurveEvaluate::evaluate`] returns, bit for bit: a
+    /// line, a Hermite curve and a rational B-spline, at every order the array holds, from
+    /// both sides, with and without the zero-tangent replacement. The entries not asked
+    /// for stay undefined, and an order past the array gives its first entries.
+    #[test]
+    fn eval_n_in_place_is_the_evaluation_bit_for_bit() {
+        let k = Kernel::default();
+        let bits = |v: Vec3| [v.x.to_bits(), v.y.to_bits(), v.z.to_bits()];
+        let curves = [
+            line([1.0, -2.0, 0.5], [0.3, 0.4, -1.2], -1.0, 2.5),
+            hermite(
+                [1.0, -2.0, 0.5],
+                [2.5, 1.0, -3.0],
+                [-1.5, 4.0, 2.0],
+                [-0.5, 3.0, 1.25],
+            ),
+            quarter_circle(),
+        ];
+        for (which, c) in curves.iter().enumerate() {
+            let ivl = c.natural_interval();
+            for step in 0..=8 {
+                let t = ivl.evaluate(f64::from(step) / 8.0);
+                for n in 0..=3 {
+                    for left in [false, true] {
+                        for non_zero in [false, true] {
+                            let want = c.evaluate(&k, t, n, left, non_zero).unwrap();
+                            let got: [Vec3; 4] = eval_n(&k, c, t, n, left, non_zero).unwrap();
+                            for (i, g) in got.iter().enumerate() {
+                                let w = want.get(i).copied().unwrap_or(Vec3::UNDEF);
+                                assert_eq!(
+                                    bits(*g),
+                                    bits(w),
+                                    "curve {which} t {t} order {n} left {left} entry {i}"
+                                );
+                            }
+                            let short: [Vec3; 2] = eval_n(&k, c, t, n, left, non_zero).unwrap();
+                            for (i, g) in short.iter().enumerate() {
+                                let w = want.get(i).copied().unwrap_or(Vec3::UNDEF);
+                                assert_eq!(bits(*g), bits(w), "curve {which} t {t} order {n}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// The curve property solver's status 1 (upstream `return TRUE`: a pseudo box corner
