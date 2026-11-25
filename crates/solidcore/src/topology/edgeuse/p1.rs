@@ -1022,20 +1022,48 @@ pub fn calc_max_edge_face_gap(
             .surface
             .as_ref()
             .ok_or_else(|| null("CalcMaxEdgeFaceGap: face without surface"))?;
-        let mut gf = GapFunction::crv_srf(xsect_tol, curve, &interval, surface, 20);
-        // get max gap sample - forces lazy evaluation
-        *gf.max_gap_sample(k, false)?
+        // not upstream: where the largest gap is depends on the curve, the interval, the
+        // surface and the tolerance alone, so it is kept by their content and read back
+        // for another value with the same content ([`Kernel::edge_face_gaps`]); a curve or
+        // surface without a content digest is measured every time
+        let key = match (curve.content_id(), surface.content_id()) {
+            (Some(c), Some(s)) => Some((
+                c,
+                s,
+                interval.min().to_bits(),
+                interval.max().to_bits(),
+                xsect_tol.to_bits(),
+            )),
+            _ => None,
+        };
+        let kept = key.as_ref().and_then(|key| {
+            k.edge_face_gaps
+                .try_borrow()
+                .ok()
+                .and_then(|gaps| gaps.get(&k.tolerances, &k.fixes, key))
+        });
+        match kept {
+            Some(sample) => sample,
+            None => {
+                let mut gf = GapFunction::crv_srf(xsect_tol, curve, &interval, surface, 20);
+                // get max gap sample - forces lazy evaluation
+                let found = *gf.max_gap_sample(k, false)?;
+                let other = found.other_param();
+                let sample = (found.this_param().x, [other.x, other.y]);
+                if let Some(key) = key {
+                    if let Ok(mut gaps) = k.edge_face_gaps.try_borrow_mut() {
+                        gaps.keep(&k.tolerances, &k.fixes, key, sample);
+                    }
+                }
+                sample
+            }
+        }
     };
 
     // set Edge/Face gap - assigns m_pEdgeuse, m_dEdgeT and m_sFaceUV and computes the
     // gap
-    let gap = EdgeFaceGap::with(
-        k,
-        b,
-        Some(eu),
-        sample.this_param().x,
-        Some(sample.other_param()),
-    )?;
+    let (edge_t, [face_u, face_v]) = sample;
+    let gap = EdgeFaceGap::with(k, b, Some(eu), edge_t, Some(Point2::new(face_u, face_v)))?;
     if cache {
         b.edgeuse_mut(eu)?.max_edge_face_gap = gap;
         // keep Mate gaps current

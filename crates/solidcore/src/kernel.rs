@@ -908,6 +908,57 @@ impl CancelToken {
     }
 }
 
+/// What decides where an edge's largest gap from its face is found: the content of the
+/// edge's curve and of the face's surface ([`crate::geom::content`]), the bits of the
+/// edge's interval ends and of the gap function's tolerance.
+#[doc(hidden)]
+pub type EdgeFaceGapKey = (u128, u128, u64, u64, u64);
+
+/// The gaps [`Kernel::edge_face_gaps`] keeps: by [`EdgeFaceGapKey`], the edge parameter
+/// and the surface parameters of the largest gap's sample. Kept for one set of the
+/// kernel's tolerances and fixes: a kernel whose tolerances or fixes differ from the ones
+/// the gaps were measured under starts again.
+#[doc(hidden)]
+#[derive(Debug, Default)]
+pub struct EdgeFaceGapsKept {
+    under: Option<(Tolerances, UpstreamFixes)>,
+    gaps: std::collections::HashMap<EdgeFaceGapKey, (f64, [f64; 2])>,
+}
+
+impl EdgeFaceGapsKept {
+    /// The most gaps kept: past it the memo starts again.
+    const MOST: usize = 1 << 18;
+
+    /// The sample kept for `key` under `tolerances` and `fixes`.
+    pub(crate) fn get(
+        &self,
+        tolerances: &Tolerances,
+        fixes: &UpstreamFixes,
+        key: &EdgeFaceGapKey,
+    ) -> Option<(f64, [f64; 2])> {
+        match &self.under {
+            Some((t, f)) if t == tolerances && f == fixes => self.gaps.get(key).copied(),
+            _ => None,
+        }
+    }
+
+    /// Keeps `sample` for `key` under `tolerances` and `fixes`.
+    pub(crate) fn keep(
+        &mut self,
+        tolerances: &Tolerances,
+        fixes: &UpstreamFixes,
+        key: EdgeFaceGapKey,
+        sample: (f64, [f64; 2]),
+    ) {
+        let same = matches!(&self.under, Some((t, f)) if t == tolerances && f == fixes);
+        if !same || self.gaps.len() >= Self::MOST {
+            self.gaps.clear();
+            self.under = Some((*tolerances, *fixes));
+        }
+        self.gaps.insert(key, sample);
+    }
+}
+
 /// The gaps [`Kernel::trim_fit_gaps`] keeps: by edge use index and the bits of its edge's
 /// interval ends, the gap measured (`None`: the measurement failed and was ignored).
 #[doc(hidden)]
@@ -1023,6 +1074,13 @@ pub struct Kernel {
     /// fixed and per trim kept covered, and measures every use of the edge each time.
     #[doc(hidden)]
     pub trim_fit_gaps: RefCell<Option<TrimFitGaps>>,
+    /// Not upstream: where the largest gap between an edge's curve and its face's surface
+    /// was found ([`crate::topology::edgeuse::p1::calc_max_edge_face_gap`]), kept by the
+    /// content of what decides it ([`EdgeFaceGapKept`]). A body made from another, and a
+    /// body read back from its record, bring the same curves and surfaces as new values:
+    /// their gaps are measured once (20 point drops each) and read back after.
+    #[doc(hidden)]
+    pub edge_face_gaps: RefCell<EdgeFaceGapsKept>,
     /// Not upstream: the arena-identity record map of the last stitch glue or split
     /// (`heal::stitch::p1`) and the B-rep value it was kept for (its progress tag, held
     /// weakly), kept only to reuse its allocation. An edit of another B-rep value starts
@@ -1150,6 +1208,7 @@ impl Kernel {
                 crate::blend::fillet_section::definition::StationMemo::default(),
             ),
             trim_fit_gaps: RefCell::new(None),
+            edge_face_gaps: RefCell::new(EdgeFaceGapsKept::default()),
             arena_notify_records: (
                 std::sync::Weak::new(),
                 crate::topology::topology::NotifyRecords::new(),
