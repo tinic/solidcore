@@ -390,8 +390,31 @@ impl<T: GnScalar> Ser<T> {
     /// `sm_SerMul`: the truncated product (the sum over `i1 <= i`, then `k1 <= k`).
     #[must_use]
     pub fn mul(&self, b: &Self, tr: Trunc) -> Self {
+        let (rows_a, rows_b) = (self.c.rows(), b.c.rows());
         Self::from_fn(tr, |i, k| {
-            // c[i1][k1] b[i - i1][k - k1], i1 then k1 ascending
+            // c[i1][k1] b[i - i1][k - k1], i1 then k1 ascending: each term read by its
+            // indices (no iterator is taken, reversed and zipped per coefficient)
+            let mut sum = T::of(0.0);
+            for i1 in 0..=i {
+                let (Some(ra), Some(rb)) = (rows_a.get(i1), rows_b.get(i - i1)) else {
+                    break;
+                };
+                for k1 in 0..=k {
+                    let (Some(&x), Some(&y)) = (ra.get(k1), rb.get(k - k1)) else {
+                        break;
+                    };
+                    sum = sum + x * y;
+                }
+            }
+            sum
+        })
+    }
+
+    /// [`Ser::mul`] as it was written before its terms were read by index: the oracle its
+    /// tests compare it with, bit for bit.
+    #[cfg(test)]
+    fn mul_by_iterators(&self, b: &Self, tr: Trunc) -> Self {
+        Self::from_fn(tr, |i, k| {
             let mut sum = T::of(0.0);
             let rows_b = b.c.rows().iter().take(i + 1).rev();
             for (ra, rb) in self.c.rows().iter().take(i + 1).zip(rows_b) {
@@ -412,13 +435,40 @@ impl<T: GnScalar> Ser<T> {
     /// zeros, and every term left out is one rounding less).
     #[must_use]
     pub fn mul_valued(&self, b: &Self, va: usize, vb: usize, tr: Trunc) -> Self {
+        let (rows_a, rows_b) = (self.c.rows(), b.c.rows());
         Self::from_fn(tr, |i, k| {
             let mut sum = T::of(0.0);
             if i + k < va + vb {
                 return sum;
             }
             // c[i1][k1] b[i - i1][k - k1], i1 then k1 ascending, both factors at or above
-            // their own degree
+            // their own degree; each term read by its indices, as [`Ser::mul`]'s
+            for i1 in 0..=i {
+                let (Some(ra), Some(rb)) = (rows_a.get(i1), rows_b.get(i - i1)) else {
+                    break;
+                };
+                for k1 in 0..=k {
+                    let (Some(&x), Some(&y)) = (ra.get(k1), rb.get(k - k1)) else {
+                        break;
+                    };
+                    if i1 + k1 >= va && (i - i1) + (k - k1) >= vb {
+                        sum = sum + x * y;
+                    }
+                }
+            }
+            sum
+        })
+    }
+
+    /// [`Ser::mul_valued`] as it was written before its terms were read by index: its
+    /// tests' oracle, bit for bit.
+    #[cfg(test)]
+    fn mul_valued_by_iterators(&self, b: &Self, va: usize, vb: usize, tr: Trunc) -> Self {
+        Self::from_fn(tr, |i, k| {
+            let mut sum = T::of(0.0);
+            if i + k < va + vb {
+                return sum;
+            }
             let rows_b = b.c.rows().iter().take(i + 1).rev();
             for (i1, (ra, rb)) in self.c.rows().iter().take(i + 1).zip(rows_b).enumerate() {
                 let terms = ra.iter().take(k + 1).zip(rb.iter().take(k + 1).rev());
@@ -721,6 +771,103 @@ mod tests {
         let sq0 = lin().mul(&lin(), tr0);
         assert_eq!(sq0.c[0][1], 0.0);
         assert_eq!(sq0.c[2][0], 0.0);
+    }
+
+    /// A series of pseudo-random coefficients (a fixed linear congruential sequence).
+    fn scrambled(seed: u64) -> Ser<f64> {
+        let mut state = seed;
+        let mut x = Ser::constant(0.0);
+        for i in 0..=MAX_S {
+            for k in 0..=STORE_E {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                // in (-4, 4), of every binade down to 2^-20
+                let unit = (state >> 11) as f64 / (1_u64 << 53) as f64;
+                let scale = f64::from(1_u32 << ((state >> 3) % 21) as u32);
+                x.set(i, k, (unit - 0.5) * 8.0 / scale);
+            }
+        }
+        x
+    }
+
+    /// The product read by index is the product the iterators gave, bit for bit, at every
+    /// truncation, with and without coefficients left out.
+    #[test]
+    fn product_by_index_is_the_product_by_iterators_bit_for_bit() {
+        let (a, b) = (scrambled(1), scrambled(2));
+        for s in 0..=MAX_S {
+            for e in 0..=MAX_E {
+                let whole = Trunc::new(s, e).unwrap();
+                for tr in [
+                    whole,
+                    whole.computing(s.max(e), e),
+                    whole.computing(s / 2 + 1, e / 2),
+                    whole.skipping(0x5a5a_5a5a_5a5a),
+                ] {
+                    let mut pairs = vec![(a.mul(&b, tr), a.mul_by_iterators(&b, tr))];
+                    for (va, vb) in [(0, 0), (1, 1), (2, 1), (3, 0), (0, 4)] {
+                        pairs.push((
+                            a.mul_valued(&b, va, vb, tr),
+                            a.mul_valued_by_iterators(&b, va, vb, tr),
+                        ));
+                    }
+                    for (got, want) in pairs {
+                        for i in 0..=MAX_S {
+                            for k in 0..=STORE_E {
+                                assert_eq!(
+                                    got.c[i][k].to_bits(),
+                                    want.c[i][k].to_bits(),
+                                    "{tr:?} {i} {k}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // an interval series the same way (its storage is on the heap)
+        let tr = Trunc::new(MAX_S, MAX_E).unwrap();
+        let ivl = |x: &Ser<f64>| {
+            let mut y = Ser::constant(Ivl::from(0.0));
+            for i in 0..=MAX_S {
+                for k in 0..=STORE_E {
+                    y.set(i, k, Ivl::from(x.at(i, k)));
+                }
+            }
+            y
+        };
+        let (ai, bi) = (ivl(&a), ivl(&b));
+        assert_eq!(ai.mul(&bi, tr), ai.mul_by_iterators(&bi, tr));
+    }
+
+    /// Not a test of anything: prints what a product costs, by index and by iterators.
+    /// `cargo test --release -p solidcore product_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a timing printout, not a check"]
+    fn product_cost() {
+        let (a, b) = (scrambled(1), scrambled(2));
+        for (s, e) in [(1, 0), (2, 0), (3, 0), (3, 2), (MAX_S, MAX_E)] {
+            let tr = Trunc::new(s, e).unwrap();
+            let n = 2_000_000_u32;
+            let time = |f: &dyn Fn(&Ser<f64>) -> Ser<f64>| {
+                let start = std::time::Instant::now();
+                let mut acc = 0.0;
+                let mut x = a;
+                for _ in 0..n {
+                    x = std::hint::black_box(f(std::hint::black_box(&x)));
+                    acc += x.c[0][0];
+                    x = a;
+                }
+                std::hint::black_box(acc);
+                start.elapsed().as_secs_f64() * 1e9 / f64::from(n)
+            };
+            let by_index = time(&|x| x.mul(&b, tr));
+            let by_iterators = time(&|x| x.mul_by_iterators(&b, tr));
+            println!(
+                "trunc ({s}, {e}): by index {by_index:.1} ns, by iterators {by_iterators:.1} ns"
+            );
+        }
     }
 
     #[test]
