@@ -449,7 +449,30 @@ pub(crate) fn fit_tolerance(k: &Kernel, b: &mut Brep, e: EdgeId) -> Result<f64> 
             if measured_faces.contains(&face) {
                 continue;
             }
-            let measured = ignored(eu1::calc_max_edge_face_gap(k, b, eu, false))?;
+            // (kept while UV trims are being made: [`Kernel::trim_fit_gaps_kept`])
+            let interval = b.edge(e)?.interval;
+            let key = (
+                eu.index(),
+                interval.min().to_bits(),
+                interval.max().to_bits(),
+            );
+            let kept = k
+                .trim_fit_gaps
+                .try_borrow()
+                .ok()
+                .and_then(|gaps| gaps.as_ref().and_then(|gaps| gaps.get(&key).copied()));
+            let measured = match kept {
+                Some(gap) => gap,
+                None => {
+                    let gap = ignored(eu1::calc_max_edge_face_gap(k, b, eu, false))?;
+                    if let Ok(mut gaps) = k.trim_fit_gaps.try_borrow_mut() {
+                        if let Some(gaps) = gaps.as_mut() {
+                            gaps.insert(key, gap);
+                        }
+                    }
+                    gap
+                }
+            };
             if measured.is_some() {
                 measured_faces.insert(face);
             }
