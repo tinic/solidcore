@@ -62,6 +62,7 @@ fn cache_kernel(k: &Kernel, context: &Context) -> Kernel {
         tolerances: k.tolerances,
         seed: k.seed,
         caches: crate::kernel::Caches {
+            fit_gap_memo: std::sync::Arc::clone(&k.caches.fit_gap_memo),
             prove_lazy_trim_raise: k.caches.prove_lazy_trim_raise,
             ..crate::kernel::Caches::default()
         },
@@ -75,7 +76,6 @@ fn cache_kernel(k: &Kernel, context: &Context) -> Kernel {
         blend_counts: core::cell::Cell::new(k.blend_counts.get()),
         // (the memo is the kernel's own: a copy starts empty and solves afresh)
         blend_station_memo: core::cell::RefCell::default(),
-        trim_fit_gaps: core::cell::RefCell::new(None),
         edge_face_gaps: core::cell::RefCell::default(),
         arena_notify_records: (
             std::sync::Weak::new(),

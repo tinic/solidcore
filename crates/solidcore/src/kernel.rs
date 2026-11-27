@@ -145,6 +145,12 @@ pub struct Caches {
     /// parameters bit for bit. Off when [`Kernel::memoize_curve_caches`] is false; clearing it
     /// changes no result, only speed.
     pub(crate) trim_move_bounds: RefCell<crate::query::curve_surface_gap::TrimBoundMemo>,
+    /// Not upstream (#20158): content-keyed memo of [`crate::topology::edgeuse::p3::fit_tolerance`]'s
+    /// uncached edge/face gap measurements (`topology::edgeuse::p3::FitGapMemo`). Shared through
+    /// an [`Arc`] so boolean worker cache kernels reuse gaps already measured by their parent
+    /// (a hit returns the exact same gap, so sharing changes no result). Off when
+    /// [`Kernel::memoize_curve_caches`] is false; clearing it changes no result, only speed.
+    pub(crate) fit_gap_memo: Arc<Mutex<crate::topology::edgeuse::p3::FitGapMemo>>,
     /// Not upstream (#18166): whether a lazily built UV trim raises its edge's tolerance by
     /// the trim's proved distance from the edge (`topology::edgeuse::p3::trim_raise_distance`),
     /// as it does by default, or by upstream's sampled distance, as a file's translation asks
@@ -173,6 +179,7 @@ impl Default for Caches {
         Self {
             curve_analysis: RefCell::default(),
             trim_move_bounds: RefCell::default(),
+            fit_gap_memo: Arc::default(),
             prove_lazy_trim_raise: true,
             hold_trim_raise: false,
             refit_raising_trims: Cell::new(false),
@@ -258,6 +265,7 @@ pub struct WorkCounters {
     booleans: Cell<u64>,
     apart_unions: Cell<u64>,
     move_trim_bisection_pieces: Cell<u64>,
+    fit_gap_calcs: Cell<u64>,
 }
 
 impl WorkCounters {
@@ -708,6 +716,13 @@ impl WorkCounters {
         self.move_trim_bisection_pieces.get()
     }
 
+    /// Uncached edge/face gap evaluations (`topology::edgeuse::p1::calc_max_edge_face_gap`)
+    /// performed by `topology::edgeuse::p3::fit_tolerance` (#20158). Not the fork's.
+    #[must_use]
+    pub fn fit_gap_calcs(&self) -> u64 {
+        self.fit_gap_calcs.get()
+    }
+
     /// Zeroes every count (`SmWorkCounters::Reset`).
     pub fn reset(&self) {
         self.face_pairs.set(0);
@@ -764,12 +779,19 @@ impl WorkCounters {
         self.booleans.set(0);
         self.apart_unions.set(0);
         self.move_trim_bisection_pieces.set(0);
+        self.fit_gap_calcs.set(0);
     }
 
     /// Counts `pieces` bisection pieces evaluated while certifying a moved trim's gap.
     pub(crate) fn add_move_trim_bisection_pieces(&self, pieces: u64) {
         self.move_trim_bisection_pieces
             .set(self.move_trim_bisection_pieces.get().saturating_add(pieces));
+    }
+
+    /// Counts one uncached edge/face gap calculation inside `fit_tolerance`.
+    pub(crate) fn add_fit_gap_calc(&self) {
+        self.fit_gap_calcs
+            .set(self.fit_gap_calcs.get().saturating_add(1));
     }
 
     /// Counts one intersection of a blend's section with a face.
@@ -1426,49 +1448,6 @@ impl EdgeFaceGapsKept {
     }
 }
 
-/// The gaps [`Kernel::trim_fit_gaps`] keeps: by edge use index and the bits of its edge's
-/// interval ends, the gap measured (`None`: the measurement failed and was ignored).
-#[doc(hidden)]
-pub type TrimFitGaps =
-    std::collections::BTreeMap<(u32, u64, u64), Option<crate::heal::gap::EdgeFaceGap>>;
-
-/// While it lives, [`crate::topology::edgeuse::p3::fit_tolerance`] keeps the gaps it
-/// measures ([`Kernel::trim_fit_gaps`]). The outermost scope starts with none and drops
-/// them at its end; a scope inside another shares the outer one's.
-pub(crate) struct TrimFitGapsKept<'k> {
-    kernel: &'k Kernel,
-    outermost: bool,
-}
-
-impl Drop for TrimFitGapsKept<'_> {
-    fn drop(&mut self) {
-        if self.outermost {
-            if let Ok(mut kept) = self.kernel.trim_fit_gaps.try_borrow_mut() {
-                *kept = None;
-            }
-        }
-    }
-}
-
-impl Kernel {
-    /// Keeps the gaps the trim fit measures until the returned scope ends
-    /// ([`TrimFitGapsKept`]): for a run that makes or fixes UV trims without changing an
-    /// edge's curve or a face's surface.
-    pub(crate) fn trim_fit_gaps_kept(&self) -> TrimFitGapsKept<'_> {
-        let outermost = match self.trim_fit_gaps.try_borrow_mut() {
-            Ok(mut kept) if kept.is_none() => {
-                *kept = Some(TrimFitGaps::new());
-                true
-            }
-            _ => false,
-        };
-        TrimFitGapsKept {
-            kernel: self,
-            outermost,
-        }
-    }
-}
-
 /// Per-session kernel state passed to operations (upstream `SmContext`).
 ///
 /// A `Kernel` is `Send` (it can move between threads) and holds no global state, so
@@ -1534,15 +1513,6 @@ pub struct Kernel {
     /// definition is evaluated through `&Kernel`; it is never borrowed across a solve, and
     /// a hit returns what a fresh solve from the same seeds gives.
     pub blend_station_memo: RefCell<crate::blend::fillet_section::definition::StationMemo>,
-    /// Not upstream: the edge/face gaps [`crate::topology::edgeuse::p3::fit_tolerance`]
-    /// measured for edge uses without a cached gap, kept while UV trims are being made
-    /// ([`Kernel::trim_fit_gaps_kept`]); `None` outside. By edge use index and the bits of
-    /// its edge's interval: the gap is the edge's curve over that interval against its
-    /// face's surface, which making and fixing UV trims does not change, so a kept gap is
-    /// what measuring again gives. The fit is asked once per edge use made, per trim
-    /// fixed and per trim kept covered, and measures every use of the edge each time.
-    #[doc(hidden)]
-    pub trim_fit_gaps: RefCell<Option<TrimFitGaps>>,
     /// Not upstream: where the largest gap between an edge's curve and its face's surface
     /// was found ([`crate::topology::edgeuse::p1::calc_max_edge_face_gap`]), kept by the
     /// content of what decides it ([`EdgeFaceGapKept`]). A body made from another, and a
@@ -1677,7 +1647,6 @@ impl Kernel {
             blend_station_memo: RefCell::new(
                 crate::blend::fillet_section::definition::StationMemo::default(),
             ),
-            trim_fit_gaps: RefCell::new(None),
             edge_face_gaps: RefCell::new(EdgeFaceGapsKept::default()),
             arena_notify_records: (
                 std::sync::Weak::new(),
