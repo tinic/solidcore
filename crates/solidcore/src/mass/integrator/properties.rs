@@ -2373,10 +2373,6 @@ fn properties_in_box(
     let estimated = size.z.max(size.x.max(size.y));
     let estimated = estimated * estimated / 100.0;
     let mut total = PreciseProperties::default();
-    // the faces' missing UV trims are made as each face is integrated, and nothing here
-    // changes an edge's curve or a face's surface: the trim fit's gaps are kept for the run,
-    // so an edge between two faces is measured once, not once for each
-    let _gaps = k.trim_fit_gaps_kept();
     for f in faces(b)? {
         k.check_cancelled(OP)?;
         let mut mass = attributes.mass_vector(
