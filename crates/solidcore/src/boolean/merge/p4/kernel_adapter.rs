@@ -77,6 +77,8 @@ fn cache_kernel(k: &Kernel, context: &Context) -> Kernel {
         // (the memo is the kernel's own: a copy starts empty and solves afresh)
         blend_station_memo: core::cell::RefCell::default(),
         edge_face_gaps: core::cell::RefCell::default(),
+        // (a cache of the surfaces' own data: a copy starts empty)
+        station_nurbs: core::cell::RefCell::default(),
         arena_notify_records: (
             std::sync::Weak::new(),
             crate::topology::topology::NotifyRecords::new(),
