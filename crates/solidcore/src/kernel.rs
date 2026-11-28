@@ -1570,6 +1570,12 @@ pub struct Kernel {
     /// their gaps are measured once (20 point drops each) and read back after.
     #[doc(hidden)]
     pub edge_face_gaps: RefCell<EdgeFaceGapsKept>,
+    /// Not upstream: the NURBS data of the B-spline surfaces the station solves read last
+    /// ([`crate::blend::fillet_section::station::NurbsMemo`]), so that a support's knots and
+    /// net are gathered once, not at every Newton step of every station. A hit is the data the
+    /// surface's NURB holds now (each is kept with the NURB's own cell, which an edit never
+    /// changes in place while it is shared), so it changes no answer, only the work.
+    pub station_nurbs: RefCell<crate::blend::fillet_section::station::NurbsMemo>,
     /// Not upstream: the arena-identity record map of the last stitch glue or split
     /// (`heal::stitch::p1`) and the B-rep value it was kept for (its progress tag, held
     /// weakly), kept only to reuse its allocation. An edit of another B-rep value starts
@@ -1698,6 +1704,7 @@ impl Kernel {
                 crate::blend::fillet_section::definition::StationMemo::default(),
             ),
             edge_face_gaps: RefCell::new(EdgeFaceGapsKept::default()),
+            station_nurbs: RefCell::default(),
             arena_notify_records: (
                 std::sync::Weak::new(),
                 crate::topology::topology::NotifyRecords::new(),
